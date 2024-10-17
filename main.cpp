@@ -26,16 +26,15 @@ struct ReturnObject {
         //     this->value = val;
         // }
 
-        std::suspend_always yield_value(int val) {
+        std::suspend_always yield_value(std::string val) {
             this->value = val;
             return std::suspend_always{};
         }
 
-        double get_value() const noexcept { return value; }
-        void set_value(double val) noexcept { value = val; }
+        std::string& get_value() noexcept { return value; }
 
     private:
-        double value{3.14};
+        std::string value{};
     };
 
     std::coroutine_handle<promise_type> h_;
@@ -45,8 +44,12 @@ struct ReturnObject {
 
     operator std::coroutine_handle<promise_type>() { return h_; }
 
-    int get_value() const {
+    const std::string& get_value() const {
         return h_.promise().get_value();
+    }
+
+    void clear_value()  {
+        h_.promise().get_value().clear();
     }
 
     ~ReturnObject() {
@@ -63,17 +66,23 @@ public:
     }
 
     void run() {
-        thread = std::thread(&TcpCoroSession::do_work, this);
+        std::cout << "socket_read call thread id: " << std::this_thread::get_id() << std::endl;
+        auto socket_ret_obj = socket_read();
+        while(true) {
+            std::cout << socket_ret_obj.get_value() << std::endl;
+            socket_ret_obj.clear_value();
+            socket_ret_obj.h_.resume();
+        }
     }
 
-    void do_work() {
+    ReturnObject socket_read() {
         while (true) {
             size_t len = conn.read_some(asio::buffer(buffer, 1024));
             std::string data{&buffer[0], len};
-            std::cout << data << std::endl;
-            std::cout << "do work thread id: " << std::this_thread::get_id() << std::endl;
+            std::cout << "socket_read result thread id: " << std::this_thread::get_id() << std::endl;
+            co_yield data;
+            //co_return
         }
-
     }
 };
 
@@ -82,10 +91,9 @@ class TcpCoroSessionHandler {
 
 public:
     void store_session(std::unique_ptr<TcpCoroSession> session, std::coroutine_handle<ReturnObject::promise_type> h) {
-        sessions.push_back(std::move(session));
-        auto sess = sessions.rbegin();
-        sess->get()->run();
         h.resume();
+        session->run();
+        sessions.push_back(std::move(session));
     }
 };
 
@@ -131,10 +139,7 @@ public:
             co_await TcpCoroAcceptor{tcp_coro_session_handler, io_context_};
         }
     }
-
-private:
 };
-
 
 int main(int argc, char **argv) {
     std::latch _latch{1};
