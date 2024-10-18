@@ -5,6 +5,53 @@
 #include <asio/ip/tcp.hpp>
 #include <latch>
 
+struct SessionObject {
+    struct promise_type {
+        SessionObject get_return_object() {
+            auto handle = std::coroutine_handle<promise_type>::from_promise(*this);
+            return SessionObject{handle};
+        }
+
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+
+        void unhandled_exception() {
+        }
+
+        void return_value(std::string& val) noexcept {
+            this->value = val;
+        }
+
+        std::suspend_always yield_value(std::string& val) {
+            this->value = val;
+            return std::suspend_always{};
+        }
+
+        std::string& get_value() noexcept { return value; }
+
+    private:
+        std::string value{};
+    };
+
+    std::coroutine_handle<promise_type> h_;
+
+    SessionObject(std::coroutine_handle<promise_type> h) : h_{h} {
+    }
+
+    operator std::coroutine_handle<promise_type>() { return h_; }
+
+    const std::string& get_value() const {
+        return h_.promise().get_value();
+    }
+
+    void clear_value()  {
+        h_.promise().get_value().clear();
+    }
+
+    ~SessionObject() {
+        h_.destroy();
+    }
+};
 
 struct ReturnObject {
     struct promise_type {
@@ -22,11 +69,7 @@ struct ReturnObject {
         void return_void() noexcept {
         }
 
-        // void return_value(int val) noexcept {
-        //     this->value = val;
-        // }
-
-        std::suspend_always yield_value(std::string val) {
+        std::suspend_always yield_value(std::string& val) {
             this->value = val;
             return std::suspend_always{};
         }
@@ -67,22 +110,20 @@ public:
 
     void run() {
         std::cout << "socket_read call thread id: " << std::this_thread::get_id() << std::endl;
-        auto socket_ret_obj = socket_read();
+
         while(true) {
+            auto socket_ret_obj = socket_read();
             std::cout << socket_ret_obj.get_value() << std::endl;
             socket_ret_obj.clear_value();
-            socket_ret_obj.h_.resume();
         }
     }
 
-    ReturnObject socket_read() {
-        while (true) {
+    SessionObject socket_read() {
             size_t len = conn.read_some(asio::buffer(buffer, 1024));
             std::string data{&buffer[0], len};
             std::cout << "socket_read result thread id: " << std::this_thread::get_id() << std::endl;
-            co_yield data;
+            co_return data;
             //co_return
-        }
     }
 };
 
@@ -90,13 +131,13 @@ class TcpCoroSessionHandler {
     std::vector<std::unique_ptr<TcpCoroSession> > sessions;
 
 public:
-    void store_session(std::unique_ptr<TcpCoroSession> session, std::coroutine_handle<ReturnObject::promise_type> h) {
-        h.resume();
+    void store_session(std::unique_ptr<TcpCoroSession> session) {
         session->run();
         sessions.push_back(std::move(session));
     }
 };
 
+class TcpCoroServer;
 struct TcpCoroAcceptor {
     asio::io_context &io_context_;
     asio::ip::tcp::acceptor acceptor_;
@@ -104,15 +145,15 @@ struct TcpCoroAcceptor {
 
     TcpCoroAcceptor(TcpCoroSessionHandler &_tcp_coro_session_handler, asio::io_context &io_context)
         : io_context_(io_context)
-          , tcp_coro_session_handler(_tcp_coro_session_handler)
-          , acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 65535)) {
+        , tcp_coro_session_handler(_tcp_coro_session_handler)
+        , acceptor_(io_context, asio::ip::tcp::endpoint(asio::ip::tcp::v4(), 65535)) {
     }
 
     void await_suspend(std::coroutine_handle<ReturnObject::promise_type> h) {
         auto conn = acceptor_.accept();
         auto session = std::make_unique<TcpCoroSession>(std::move(conn));
         std::cout << "awaiting suspend call from " << "thread id: " << std::this_thread::get_id() << std::endl;
-        tcp_coro_session_handler.store_session(std::move(session), h);
+        tcp_coro_session_handler.store_session(std::move(session));
     }
 
     void await_resume() {
@@ -132,12 +173,10 @@ public:
           , tcp_coro_session_handler(_tcp_coro_session_handler) {
     }
 
-    ReturnObject start() {
+    ReturnObject accept() {
         running_ = true;
-        while (running_) {
-            std::cout << "awaiting for a new connection " << "thread id: " << std::this_thread::get_id() << std::endl;
-            co_await TcpCoroAcceptor{tcp_coro_session_handler, io_context_};
-        }
+        std::cout << "awaiting for a new connection " << "thread id: " << std::this_thread::get_id() << std::endl;
+        co_await TcpCoroAcceptor{tcp_coro_session_handler, io_context_};
     }
 };
 
@@ -146,8 +185,13 @@ int main(int argc, char **argv) {
     asio::io_context io_context_;
     TcpCoroSessionHandler tcp_coro_session_handler;
     TcpCoroServer server(io_context_, tcp_coro_session_handler);
-    server.start();
     io_context_.run();
+
+    while (true) {
+        auto ret_obj = server.accept();
+        ret_obj.h_.resume();
+    }
+
     _latch.wait();
     return 0;
 }
